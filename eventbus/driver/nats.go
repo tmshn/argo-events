@@ -210,10 +210,12 @@ func (n *natsStreaming) SubscribeEventSources(ctx context.Context, conn Connecti
 }
 
 func (n *natsStreaming) processEventSourceMsg(m *stan.Msg, msgHolder *eventSourceMessageHolder, filter func(dependencyName string, event cloudevents.Event) bool, action func(map[string]cloudevents.Event), log *zap.SugaredLogger) {
+	log.Desugar().Info("msgHolder status", msgHolder.debug("before")...)
 	var event *cloudevents.Event
 	if err := json.Unmarshal(m.Data, &event); err != nil {
 		log.Errorf("Failed to convert to a cloudevent, discarding it... err: %v", err)
 		_ = m.Ack()
+		log.Desugar().Info("msgHolder status", msgHolder.debug("after")...)
 		return
 	}
 
@@ -221,12 +223,15 @@ func (n *natsStreaming) processEventSourceMsg(m *stan.Msg, msgHolder *eventSourc
 	if err != nil {
 		log.Errorf("Failed to get the dependency name, discarding it... err: %v", err)
 		_ = m.Ack()
+		log.Desugar().Info("msgHolder status", msgHolder.debug("after")...)
 		return
 	}
+	log = log.With("depName", depName, "eventID", event.ID())
 
 	if depName == "" || !filter(depName, *event) {
 		// message not interested
 		_ = m.Ack()
+		log.Desugar().Info("msgHolder status", msgHolder.debug("after")...)
 		return
 	}
 
@@ -244,6 +249,7 @@ func (n *natsStreaming) processEventSourceMsg(m *stan.Msg, msgHolder *eventSourc
 	if _, ok := msgHolder.smap.Load(event.ID()); ok {
 		log.Infow("ATTENTION: Duplicate delivered message detected", "message", m)
 		_ = m.Ack()
+		log.Desugar().Info("msgHolder status", msgHolder.debug("after")...)
 		return
 	}
 
@@ -255,8 +261,10 @@ func (n *natsStreaming) processEventSourceMsg(m *stan.Msg, msgHolder *eventSourc
 				msgHolder.reset(depName)
 			}
 			msgHolder.ackAndCache(m, event.ID())
+			log.Desugar().Info("msgHolder status", msgHolder.debug("after")...)
 			return
 		}
+		log.Desugar().Info("msgHolder status", msgHolder.debug("after")...)
 		return
 	}
 
@@ -264,10 +272,12 @@ func (n *natsStreaming) processEventSourceMsg(m *stan.Msg, msgHolder *eventSourc
 	if existingMsg, ok := msgHolder.msgs[depName]; ok {
 		if m.Timestamp == existingMsg.timestamp {
 			// Redelivered latest messge, return
+			log.Desugar().Info("msgHolder status", msgHolder.debug("after")...)
 			return
 		} else if m.Timestamp < existingMsg.timestamp {
 			// Redelivered old message, ack and return
 			msgHolder.ackAndCache(m, event.ID())
+			log.Desugar().Info("msgHolder status", msgHolder.debug("after")...)
 			return
 		}
 	}
@@ -280,6 +290,7 @@ func (n *natsStreaming) processEventSourceMsg(m *stan.Msg, msgHolder *eventSourc
 	for k, v := range msgHolder.msgs {
 		if (now - v.timestamp) > 3*24*60*60*1000000000 {
 			msgHolder.reset(k)
+			log.Desugar().Info("msgHolder status", msgHolder.debug("after")...)
 			return
 		}
 	}
@@ -288,9 +299,11 @@ func (n *natsStreaming) processEventSourceMsg(m *stan.Msg, msgHolder *eventSourc
 	if err != nil {
 		log.Errorf("failed to evaluate dependency expression: %v", err)
 		// TODO: how to handle this situation?
+		log.Desugar().Info("msgHolder status", msgHolder.debug("after")...)
 		return
 	}
 	if result != true {
+		log.Desugar().Info("msgHolder status", msgHolder.debug("after")...)
 		return
 	}
 	msgHolder.latestGoodMsgTimestamp = m.Timestamp
@@ -306,6 +319,7 @@ func (n *natsStreaming) processEventSourceMsg(m *stan.Msg, msgHolder *eventSourc
 
 	msgHolder.reset(depName)
 	msgHolder.ackAndCache(m, event.ID())
+	log.Desugar().Info("msgHolder status", msgHolder.debug("after")...)
 }
 
 // eventSourceMessage is used by messageHolder to hold the latest message
@@ -414,6 +428,22 @@ func (mh *eventSourceMessageHolder) isCleanedUp() bool {
 		}
 	}
 	return len(mh.msgs) == 0
+}
+
+func (mh *eventSourceMessageHolder) debug(timing string) []zap.Field {
+	msgTimestamps := make(map[string]time.Time, len(mh.msgs))
+	for k, msg := range mh.msgs {
+		msgTimestamps[k] = time.Unix(msg.timestamp / 1000000000, msg.timestamp % 1000000000)
+	}
+	return []zap.Field{
+		zap.Bool("tmshnDebug", true),
+		zap.String("timing", timing),
+		zap.Time("lastMeetTime", time.Unix(mh.lastMeetTime, 0)),
+		zap.Time("latestGoodMsgTimestamp", time.Unix(mh.latestGoodMsgTimestamp / 1000000000, mh.latestGoodMsgTimestamp % 1000000000)),
+		zap.Any("parameters", mh.parameters),
+		zap.Any("msgTimestamps", msgTimestamps),
+
+	}
 }
 
 func unique(stringSlice []string) []string {
